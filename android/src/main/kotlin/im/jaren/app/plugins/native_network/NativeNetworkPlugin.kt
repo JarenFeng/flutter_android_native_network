@@ -235,6 +235,36 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
                 })
             }
 
+            "MOVE" -> {
+                val request = requestBuilder
+                    .method("MOVE", RequestBody.create(null, ByteArray(0)))
+                    .build()
+
+                client.newCall(request).enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {
+                        handleHttpFailure(e, result)
+                    }
+
+                    override fun onResponse(call: Call, response: Response) {
+                        response.use {
+                            val bodyBytes = response.body?.bytes() ?: ByteArray(0)
+
+                            val resultMap = HashMap<String, Any>()
+                            resultMap["statusCode"] = response.code
+                            resultMap["body"] = bodyBytes
+                            resultMap["contentLength"] = response.headersContentLength()
+                            val headersMap = mutableMapOf<String, String>()
+                            for ((name, value) in response.headers) {
+                                headersMap[name] = value
+                            }
+                            resultMap["headers"] = headersMap
+
+                            flutterSuccess(result, resultMap)
+                        }
+                    }
+                })
+            }
+
             else -> flutterError(result, "UNSUPPORTED_METHOD", "HTTP method $method is not supported")
         }
     }
