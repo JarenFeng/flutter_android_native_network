@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:native_network/native_network.dart';
 import 'package:native_network/native_network_platform_interface.dart';
@@ -15,12 +17,6 @@ class MockNativeNetworkPlatform with MockPlatformInterfaceMixin implements Nativ
   }
 
   @override
-  Future<void> openSocket({required String host, required int port}) {
-    // TODO: implement openSocket
-    throw UnimplementedError();
-  }
-
-  @override
   Future<HttpResponse> request(
       {required String url,
       String method = 'GET',
@@ -32,6 +28,31 @@ class MockNativeNetworkPlatform with MockPlatformInterfaceMixin implements Nativ
       Duration? readTimeout,
       Duration? writeTimeout}) {
     // TODO: implement request
+    throw UnimplementedError();
+  }
+
+  @override
+  Future closeSocket({required String socketId}) {
+    // TODO: implement closeSocket
+    throw UnimplementedError();
+  }
+
+
+
+  @override
+  Future<String> openSocket({
+    required String host,
+    required int port,
+    int? connectionTimeoutMilliseconds,
+    void Function(SocketEvent)? onEvent,
+  }) {
+    // TODO: implement openSocket
+    throw UnimplementedError();
+  }
+
+  @override
+  Future sendSocket({required String socketId, required List<int> data}) {
+    // TODO: implement sendSocket
     throw UnimplementedError();
   }
 }

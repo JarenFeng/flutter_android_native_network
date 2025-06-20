@@ -11,33 +11,40 @@ class MethodChannelNativeNetwork extends NativeNetworkPlatform {
   /// The method channel used to interact with the native platform.
 
   final _methodChannel = const MethodChannel('native_network/method');
-  final _eventChannel = const EventChannel('native_network/event');
+  final _httpEventChannel = const EventChannel('native_network/event');
+  final _socketEventChannel = const EventChannel('native_network/socket_event');
 
   final _httpProgressCallbacks = <String, void Function(NetworkProgress)>{};
   final _socketEventCallbacks = <String, void Function(SocketEvent)>{};
 
   MethodChannelNativeNetwork() {
-    _eventChannel.receiveBroadcastStream().listen((event) {
+    _httpEventChannel.receiveBroadcastStream().listen((event) {
       final map = Map<String, dynamic>.from(event);
       final type = map['type'];
 
       switch (type) {
+      // download / upload progress
         case 'd-p':
         case 'u-p':
           final progress = NetworkProgress.fromMap(map);
           _httpProgressCallbacks[progress.requestId]?.call(progress);
           break;
-
-        case 's-e':
-          final socketId = map['socketId'];
-          final handler = _socketEventCallbacks[socketId];
-          if (handler != null) {
-            handler(SocketEvent.fromMap(map));
-          }
-          break;
-
         default:
           debugPrint("Unknown event type: \$type");
+      }
+    });
+
+    _socketEventChannel.receiveBroadcastStream().listen((event) {
+      final map = Map<String, dynamic>.from(event);
+      final socketId = map['socketId'];
+      final handler = _socketEventCallbacks[socketId];
+      var se = SocketEvent.fromMap(map);
+      if (handler != null) handler(se);
+
+      if (se.type == 'disconnected') {
+        print("socket disconnected, remove event callback");
+        _socketEventCallbacks.remove(socketId);
+        return;
       }
     });
   }
@@ -98,24 +105,42 @@ class MethodChannelNativeNetwork extends NativeNetworkPlatform {
   }
 
   @override
-  Future<void> openSocket({
+  Future<String> openSocket({
     required String host,
     required int port,
-  }) async {
+    int? connectionTimeoutMilliseconds,
+    void Function(SocketEvent)? onEvent,
+  }) {
     final socketId = generateRandomString(20);
-    await _methodChannel.invokeMethod('openSocket', {
+    return _methodChannel.invokeMethod('openSocket', {
       'socketId': socketId,
       'host': host,
       'port': port,
+      'connectionTimeoutMilliseconds': connectionTimeoutMilliseconds,
+    }).then((id) {
+      if (onEvent != null) _socketEventCallbacks[socketId] = onEvent;
+      print("Native network, open socket, native returns, socket id: $socketId");
+      return socketId;
     });
   }
 
-  void registerSocketCallback(String socketId, void Function(SocketEvent) onEvent) {
-    _socketEventCallbacks[socketId] = onEvent;
+  @override
+  Future closeSocket({required String socketId}) async {
+    return _methodChannel.invokeMethod('closeSocket', {'socketId': socketId}).then((_) {
+      _socketEventCallbacks.remove(socketId);
+      print("remove onEvent callback for socket id: $socketId");
+    }).catchError((e) {
+      print("close socket error. $e");
+      _socketEventCallbacks.remove(socketId);
+    });
   }
 
-  void unregisterSocketCallback(String socketId) {
-    _socketEventCallbacks.remove(socketId);
+  @override
+  Future sendSocket({required String socketId, required List<int> data}) async {
+    return _methodChannel.invokeMethod('sendSocket', {
+      'socketId': socketId,
+      'data': data,
+    });
   }
 }
 

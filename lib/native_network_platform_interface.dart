@@ -42,9 +42,18 @@ abstract class NativeNetworkPlatform extends PlatformInterface {
     Duration? writeTimeout,
   });
 
-  Future<void> openSocket({
+  Future<String> openSocket({
     required String host,
     required int port,
+    int? connectionTimeoutMilliseconds,
+    void Function(SocketEvent)? onEvent,
+  });
+
+  Future closeSocket({required String socketId});
+
+  Future sendSocket({
+    required String socketId,
+    required List<int> data,
   });
 }
 
@@ -65,7 +74,7 @@ class HttpResponse {
     Stream<List<int>>? responseStream,
   })  : _bodyBytes = bodyBytes,
         _bodyString = body,
-        _responseStream= responseStream;
+        _responseStream = responseStream;
 
   factory HttpResponse.fromBytes({
     required int statusCode,
@@ -97,7 +106,7 @@ class HttpResponse {
 
   factory HttpResponse.fromStream({
     required int statusCode,
-    required  Stream<List<int>>? responseStream,
+    required Stream<List<int>>? responseStream,
     required int contentLength,
     required Map<String, String> headers,
   }) {
@@ -178,7 +187,7 @@ class SocketEvent {
       socketId: map['socketId'],
       type: map['type'],
       data: (map['data'] as List?)?.cast<int>(),
-      error: map['error'],
+      error: map['message'],
     );
   }
 }

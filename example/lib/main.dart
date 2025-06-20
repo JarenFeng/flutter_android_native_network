@@ -51,6 +51,8 @@ class _MyAppState extends State<MyApp> with WiFiConnectionHelperMixin {
     });
   }
 
+  String? _currentSocketId;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -122,9 +124,37 @@ class _MyAppState extends State<MyApp> with WiFiConnectionHelperMixin {
               child: const Text('Upload file')),
           OutlinedButton(
               onPressed: () async {
-                _nativeNetworkPlugin.openSocket(host: '192.168.49.1', port: 1111);
+                _nativeNetworkPlugin
+                    .openSocket(
+                        host: '192.168.1.1',
+                        port: 6666,
+                        onEvent: (event) {
+                          //
+                          LogUtils.d("Socket Event", "socket id: ${event.socketId}, type: ${event.type}, data: ${event.data}, error: ${event.error}");
+                        })
+                    .then((socketId) {
+                  _currentSocketId = socketId;
+
+                  LogUtils.d("Socket", "socket connected, id: $socketId");
+                });
               },
               child: const Text('Socket Test')),
+          OutlinedButton(
+              onPressed: () async {
+                if (_currentSocketId == null) {
+                  LogUtils.d("Socket", "current socket id is null");
+                  return;
+                }
+                _nativeNetworkPlugin
+                    .sendSocket(
+                  socketId: _currentSocketId!,
+                  data: Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+                )
+                    .then((_) {
+                  LogUtils.d("Socket", "send socket data done");
+                });
+              },
+              child: const Text('Send Socket Data')),
           OutlinedButton(
               onPressed: () async {
                 HttpClient().get("www.baidu.com", 80, "").then((request) {

@@ -10,6 +10,7 @@ import android.util.Log
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.EventChannel.StreamHandler
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
@@ -21,7 +22,6 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
 import okhttp3.internal.headersContentLength
-import okio.IOException
 import java.io.File
 import java.io.FileOutputStream
 import java.net.ConnectException
@@ -29,14 +29,32 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLHandshakeException
+import java.net.Socket
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.InetSocketAddress
+import java.util.concurrent.LinkedBlockingQueue
 
 /** NativeNetworkPlugin */
-class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler {
+class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler {
 
     private lateinit var channel: MethodChannel
-    private lateinit var eventChannel: EventChannel
 
-    private var eventSink: EventChannel.EventSink? = null
+    private lateinit var httpEventChannel: EventChannel
+    private var httpEventSink: EventChannel.EventSink? = null
+
+    private lateinit var socketEventChannel: EventChannel
+    private var socketEventSink: EventChannel.EventSink? = null
+
+
+    private val socketMap = mutableMapOf<String, Socket>()
+    private val outputMap = mutableMapOf<String, OutputStream>()
+    private val inputMap = mutableMapOf<String, InputStream>()
+    private val receiveThreads = mutableMapOf<String, Thread>()
+    private val writeQueues = mutableMapOf<String, LinkedBlockingQueue<ByteArray>>()
+    private val writeThreads = mutableMapOf<String, Thread>()
+
     private lateinit var context: Context
 
     companion object {
@@ -49,8 +67,27 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
 
         channel = MethodChannel(binding.binaryMessenger, "native_network/method")
         channel.setMethodCallHandler(this)
-        eventChannel = EventChannel(binding.binaryMessenger, "native_network/event")
-        eventChannel.setStreamHandler(this)
+        httpEventChannel = EventChannel(binding.binaryMessenger, "native_network/event")
+        httpEventChannel.setStreamHandler(object : StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                httpEventSink = events
+            }
+
+            override fun onCancel(arguments: Any?) {
+                httpEventSink = null
+            }
+        })
+
+        socketEventChannel = EventChannel(binding.binaryMessenger, "native_network/socket_event")
+        socketEventChannel.setStreamHandler(object : StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                socketEventSink = events
+            }
+
+            override fun onCancel(arguments: Any?) {
+                socketEventSink = null
+            }
+        })
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -77,7 +114,15 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
             }
 
             "openSocket" -> {
-                handleHttpRequest(call.arguments as Map<String, Any>, result)
+                handleOpenSocket(call.arguments as Map<String, Any>, result)
+            }
+
+            "closeSocket" -> {
+                handleCloseSocket(call.arguments as Map<String, Any>, result)
+            }
+
+            "sendSocket" -> {
+                handleSendSocket(call.arguments as Map<String, Any>, result)
             }
 
             else -> result.notImplemented()
@@ -105,7 +150,7 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
     private fun getSsidFromWifiManager(): String? {
         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val info = wifiManager.connectionInfo
-        return info?.ssid?.replace("\"", "")  // 去除双引号
+        return info?.ssid?.replace("\"", "")
     }
 
     private fun handleHttpRequest(args: Map<String, Any>, result: MethodChannel.Result) {
@@ -123,7 +168,7 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
         val client = OkHttpClient.Builder().apply {
             boundNetwork?.let { socketFactory(it.socketFactory) }
             if (filePath != null && method == "GET") {
-                addNetworkInterceptor(ProgressInterceptor(requestId, eventSink))
+                addNetworkInterceptor(ProgressInterceptor(requestId, httpEventSink))
             }
             this.connectTimeout(connectTimeout, TimeUnit.MILLISECONDS)
             this.readTimeout(readTimeout, TimeUnit.MILLISECONDS)
@@ -172,7 +217,7 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
                 val requestBody = when {
                     filePath != null -> {
                         val file = File(filePath)
-                        ProgressRequestBody(file, mediaType, requestId, eventSink)
+                        ProgressRequestBody(file, mediaType, requestId, httpEventSink)
                     }
 
                     body != null -> RequestBody.create(mediaType, body)
@@ -265,6 +310,7 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
                 })
             }
 
+
             else -> flutterError(result, "UNSUPPORTED_METHOD", "HTTP method $method is not supported")
         }
     }
@@ -321,21 +367,153 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
     }
 
     private fun handleOpenSocket(args: Map<String, Any>, result: MethodChannel.Result) {
-        val requestId = args["requestId"] as String
-        val url = args["url"] as String
+        val socketId = args["socketId"] as String
+        val host = args["host"] as String
+        val port = args["port"] as Int
+        var connectionTimeoutMilliseconds = args["connectionTimeoutMilliseconds"] as Int?
+        if (connectionTimeoutMilliseconds == null) connectionTimeoutMilliseconds = 5000
+
+        if (boundNetwork == null) {
+            Log.w("NativeNetwork", "bound network is null")
+            flutterError(result, "NO_BOUND_NETWORK", "The 'boundNetwork' is null", null)
+            return
+        }
+
+
+        Thread {
+            try {
+                val socket = Socket()
+
+                boundNetwork?.bindSocket(socket)
+
+                Log.d("NativeNetwork", "bind socket to network")
+
+                socket.connect(InetSocketAddress(host, port), connectionTimeoutMilliseconds)
+                val output = socket.getOutputStream()
+                val input = socket.getInputStream()
+
+                Log.d("NativeNetwork", "socket ready")
+
+                socketMap[socketId] = socket
+                outputMap[socketId] = output
+                inputMap[socketId] = input
+
+                val writeQueue = LinkedBlockingQueue<ByteArray>()
+                writeQueues[socketId] = writeQueue
+
+                val writeThread = Thread {
+                    try {
+                        while (!Thread.currentThread().isInterrupted) {
+                            val data = writeQueue.take()
+                            output.write(data)
+                            output.flush()
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "send socket error", e)
+                    }
+                }
+                writeThread.start()
+                writeThreads[socketId] = writeThread
+
+                Log.d("NativeNetwork", "open socket, call flutter success")
+
+                flutterSuccess(result, socketId)
+
+                val thread = Thread {
+                    try {
+                        val inputStream = socket.getInputStream()
+                        val buffer = ByteArray(1024)
+
+                        while (true) {
+                            val length = inputStream.read(buffer)
+                            if (length == -1) break
+                            val received = buffer.copyOf(length)
+                            flutterEvent(
+                                socketEventSink, mapOf(
+                                    "socketId" to socketId,
+                                    "type" to "data",
+                                    "data" to received
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        flutterEvent(
+                            socketEventSink, mapOf("socketId" to socketId, "type" to "error", "message" to e.message)
+                        )
+                    } finally {
+                        flutterEvent(socketEventSink, mapOf("socketId" to socketId, "type" to "disconnected"))
+                        cleanup(socketId)
+                    }
+                }
+                receiveThreads[socketId] = thread
+                thread.start()
+
+            } catch (e: IOException) {
+                flutterEvent(socketEventSink, mapOf("socketId" to socketId, "type" to "error", "message" to e.message))
+            }
+        }.start()
     }
 
+    private fun handleCloseSocket(args: Map<String, Any>, result: MethodChannel.Result) {
+        val socketId = args["socketId"] as String
 
-    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-        eventSink = events
-        Log.d(TAG, "event sink onListen: $eventSink")
+        try {
+            socketMap[socketId]?.close()
+            flutterSuccess(result, true)
+        } catch (_: Exception) {
+        }
+        cleanup(socketId)
     }
 
-    override fun onCancel(arguments: Any?) {
-        eventSink = null
-        Log.d(TAG, "event sink onCancel")
+    private fun handleSendSocket(args: Map<String, Any>, result: MethodChannel.Result) {
+        val socketId = args["socketId"] as String
+        val data = args["data"] as ByteArray
+
+        val output = outputMap[socketId]
+
+        val queue = writeQueues[socketId]
+
+        if (output != null && queue != null) {
+            if (queue.offer(data)) flutterSuccess(result, true)
+            else flutterError(result, "ADD_QUEUE_FAILED", "Failed to add write queue, queue or connection may be closed.")
+        } else {
+            flutterError(result, "NO_CONNECTION", "No connection for socketId: $socketId", null)
+        }
+    }
+
+    private fun cleanup(socketId: String) {
+        try {
+            socketMap.remove(socketId)?.close()
+        } catch (_: Exception) {
+        }
+
+        try {
+            inputMap.remove(socketId)?.close()
+        } catch (_: Exception) {
+        }
+
+        try {
+            outputMap.remove(socketId)?.close()
+        } catch (_: Exception) {
+        }
+
+        try {
+            writeThreads.remove(socketId)?.interrupt()
+        } catch (_: Exception) {
+        }
+
+        try {
+            receiveThreads.remove(socketId)?.interrupt()
+        } catch (_: Exception) {
+        }
+
+        try {
+            writeQueues.remove(socketId)
+        } catch (_: Exception) {
+        }
 
     }
+
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -356,5 +534,10 @@ class NativeNetworkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
         }
     }
 
+    private fun flutterEvent(sink: EventChannel.EventSink?, value: Any?) {
+        mainHandler.post {
+            sink?.success(value)
+        }
+    }
 
 }
